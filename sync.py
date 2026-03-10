@@ -4,6 +4,7 @@ Storyteller → Hardcover one-way progress sync.
 
 Polls Storyteller every 15 minutes and pushes any book progress
 (≥ 1% change) to Hardcover. Books with zero progress are ignored.
+100% progress marks the book as Read on Hardcover.
 """
 
 import json
@@ -80,8 +81,8 @@ class StorytellerClient:
 
     def get_progress(self, book_id) -> float | None:
         """
-        Returns totalProgression (0.0–1.0) or None if no position has
-        been recorded yet.
+        Returns totalProgression (0.0–1.0) or None if no position recorded.
+        For Read Aloud books this is the epub3 text position (synced with audio).
         """
         resp = self.session.get(
             f"{STORYTELLER_URL}/api/books/{book_id}/positions",
@@ -125,9 +126,7 @@ class HardcoverClient:
         return self.user_id
 
     def search_book(self, title: str) -> int | None:
-        """
-        Search Hardcover by title. Returns the top-match book_id or None.
-        """
+        """Search Hardcover by title. Returns top-match book_id or None."""
         data = self._gql(
             """
             query Search($q: String!) {
@@ -144,24 +143,31 @@ class HardcoverClient:
         hits = results.get("hits", [])
         if not hits:
             return None
-        # Hardcover search results nest the book data under "document"
         doc = hits[0].get("document", hits[0])
         raw_id = doc.get("id")
         return int(raw_id) if raw_id is not None else None
 
     def get_book_edition_data(self, book_id: int) -> dict:
-        """Return audio_seconds and pages for a book (used to calculate progress input)."""
+        """
+        Returns the best edition for page-based progress tracking.
+
+        Hardcover computes the `progress` percentage (used by external APIs)
+        from progress_pages / edition.pages — NOT from progress_seconds.
+        We therefore use a print/ebook edition and progress_pages so that
+        the percentage shown in Hardcover matches Storyteller exactly.
+        """
         data = self._gql(
             """
             query BookData($bookId: Int!) {
               books(where: {id: {_eq: $bookId}}) {
                 pages
                 editions(
-                  where: {audio_seconds: {_gt: 0}},
+                  where: {pages: {_gt: 0}},
                   limit: 1,
-                  order_by: {audio_seconds: desc}
+                  order_by: {pages: desc}
                 ) {
-                  audio_seconds
+                  id
+                  pages
                 }
               }
             }
@@ -170,11 +176,13 @@ class HardcoverClient:
         )
         books = data.get("books", [])
         if not books:
-            return {"pages": None, "audio_seconds": None}
+            return {"edition_id": None, "pages": None}
         book = books[0]
         editions = book.get("editions", [])
-        audio_seconds = editions[0]["audio_seconds"] if editions else None
-        return {"pages": book.get("pages"), "audio_seconds": audio_seconds}
+        if editions:
+            return {"edition_id": editions[0]["id"], "pages": editions[0]["pages"]}
+        # Fall back to book-level page count (no specific edition)
+        return {"edition_id": None, "pages": book.get("pages")}
 
     def get_user_book(self, book_id: int) -> dict | None:
         data = self._gql(
@@ -197,17 +205,21 @@ class HardcoverClient:
         books = data.get("user_books", [])
         return books[0] if books else None
 
-    def create_user_book(self, book_id: int) -> int:
-        """Creates a user_book with status 'Currently Reading'. Returns id."""
+    def create_user_book(self, book_id: int, edition_id: int | None) -> int:
+        """Creates a user_book with status Currently Reading. Returns id."""
         data = self._gql(
             """
-            mutation CreateUserBook($bookId: Int!) {
-              insert_user_book(object: {book_id: $bookId, status_id: 2}) {
+            mutation CreateUserBook($bookId: Int!, $editionId: Int) {
+              insert_user_book(object: {
+                book_id: $bookId,
+                status_id: 2,
+                edition_id: $editionId
+              }) {
                 id
               }
             }
             """,
-            {"bookId": book_id},
+            {"bookId": book_id, "editionId": edition_id},
         )
         return data["insert_user_book"]["id"]
 
@@ -223,41 +235,32 @@ class HardcoverClient:
             {"id": user_book_id, "statusId": status_id},
         )
 
-    @staticmethod
-    def _progress_vars(
-        progress: float,
-        audio_seconds: int | None,
-        pages: int | None,
-    ) -> tuple[int | None, int | None]:
-        """Return (progress_seconds, progress_pages) — one will be set, one None."""
-        if audio_seconds:
-            return round(progress * audio_seconds), None
-        if pages:
-            return None, round(progress * pages)
-        return None, None
-
     def create_read_session(
         self,
         user_book_id: int,
         progress: float,
-        audio_seconds: int | None,
         pages: int | None,
+        edition_id: int | None,
+        finished: bool = False,
     ) -> int:
-        prog_secs, prog_pages = self._progress_vars(progress, audio_seconds, pages)
+        prog_pages = round(progress * pages) if pages else None
+        finished_at = str(date.today()) if finished else None
         data = self._gql(
             """
             mutation CreateRead(
               $userBookId: Int!,
               $startedAt: date!,
-              $progressSeconds: Int,
-              $progressPages: Int
+              $progressPages: Int,
+              $editionId: Int,
+              $finishedAt: date
             ) {
               insert_user_book_read(
                 user_book_id: $userBookId,
                 user_book_read: {
                   started_at: $startedAt,
-                  progress_seconds: $progressSeconds,
-                  progress_pages: $progressPages
+                  progress_pages: $progressPages,
+                  edition_id: $editionId,
+                  finished_at: $finishedAt
                 }
               ) {
                 id
@@ -267,8 +270,9 @@ class HardcoverClient:
             {
                 "userBookId": user_book_id,
                 "startedAt": str(date.today()),
-                "progressSeconds": prog_secs,
                 "progressPages": prog_pages,
+                "editionId": edition_id,
+                "finishedAt": finished_at,
             },
         )
         return data["insert_user_book_read"]["id"]
@@ -277,20 +281,24 @@ class HardcoverClient:
         self,
         read_id: int,
         progress: float,
-        audio_seconds: int | None,
         pages: int | None,
+        edition_id: int | None,
+        finished: bool = False,
     ) -> None:
-        prog_secs, prog_pages = self._progress_vars(progress, audio_seconds, pages)
+        prog_pages = round(progress * pages) if pages else None
+        finished_at = str(date.today()) if finished else None
         self._gql(
             """
             mutation UpdateRead(
               $id: Int!,
-              $progressSeconds: Int,
-              $progressPages: Int
+              $progressPages: Int,
+              $editionId: Int,
+              $finishedAt: date
             ) {
               update_user_book_read(id: $id, object: {
-                progress_seconds: $progressSeconds,
-                progress_pages: $progressPages
+                progress_pages: $progressPages,
+                edition_id: $editionId,
+                finished_at: $finishedAt
               }) {
                 id
               }
@@ -298,8 +306,9 @@ class HardcoverClient:
             """,
             {
                 "id": read_id,
-                "progressSeconds": prog_secs,
                 "progressPages": prog_pages,
+                "editionId": edition_id,
+                "finishedAt": finished_at,
             },
         )
 
@@ -328,22 +337,23 @@ def sync_book(
     if abs(progress - last_progress) < MIN_DELTA:
         return  # Change too small — skip
 
+    finished = progress >= 1.0
     log.info('"%s": %.1f%% → %.1f%%', title, last_progress * 100, progress * 100)
 
     # ── Find book on Hardcover ────────────────────────────────────────────────
-    hc_book_id    = book_state.get("hardcover_book_id")
-    audio_seconds = book_state.get("audio_seconds")
-    pages         = book_state.get("pages")
+    hc_book_id = book_state.get("hardcover_book_id")
+    pages      = book_state.get("pages")
+    edition_id = book_state.get("edition_id")
 
     if not hc_book_id:
         hc_book_id = hc.search_book(title)
         if not hc_book_id:
             log.warning('  Could not find "%s" on Hardcover — skipping.', title)
             return
-        edition = hc.get_book_edition_data(hc_book_id)
-        audio_seconds = edition["audio_seconds"]
-        pages         = edition["pages"]
-        log.info('  Edition data — audio_seconds: %s, pages: %s', audio_seconds, pages)
+        ed = hc.get_book_edition_data(hc_book_id)
+        pages      = ed["pages"]
+        edition_id = ed["edition_id"]
+        log.info('  Edition %s — %s pages', edition_id, pages)
 
     # ── Resolve or create user_book record ───────────────────────────────────
     user_book_id = book_state.get("hardcover_user_book_id")
@@ -356,22 +366,30 @@ def sync_book(
             reads = user_book.get("user_book_reads", [])
             if reads:
                 read_id = reads[0]["id"]
-            if user_book.get("status_id") != 2:
+            if user_book.get("status_id") not in (2, 3):
                 hc.set_status(user_book_id, 2)
-                log.info('  Set "%s" to Currently Reading on Hardcover.', title)
+                log.info('  Set to Currently Reading.')
         else:
-            user_book_id = hc.create_user_book(hc_book_id)
-            log.info('  Created user_book for "%s" on Hardcover.', title)
+            user_book_id = hc.create_user_book(hc_book_id, edition_id)
+            log.info('  Created user_book on Hardcover.')
 
     # ── Push progress ─────────────────────────────────────────────────────────
     if read_id:
         try:
-            hc.update_read_session(read_id, progress, audio_seconds, pages)
+            hc.update_read_session(read_id, progress, pages, edition_id, finished)
         except Exception:
-            # Read session may have been deleted — create a new one
-            read_id = hc.create_read_session(user_book_id, progress, audio_seconds, pages)
+            read_id = hc.create_read_session(user_book_id, progress, pages, edition_id, finished)
     else:
-        read_id = hc.create_read_session(user_book_id, progress, audio_seconds, pages)
+        read_id = hc.create_read_session(user_book_id, progress, pages, edition_id, finished)
+
+    # ── Mark as Read if completed ─────────────────────────────────────────────
+    if finished:
+        hc.set_status(user_book_id, 3)
+        log.info('  Marked "%s" as Read on Hardcover.', title)
+    elif book_state.get("hardcover_user_book_id") and not finished:
+        # Ensure status stays Currently Reading (not already marked done)
+        if book_state.get("last_synced_progress", 0) < 1.0:
+            pass  # status already set correctly
 
     # ── Persist state ─────────────────────────────────────────────────────────
     state["books"][book_key] = {
@@ -380,8 +398,8 @@ def sync_book(
         "hardcover_book_id":       hc_book_id,
         "hardcover_user_book_id":  user_book_id,
         "hardcover_read_id":       read_id,
-        "audio_seconds":           audio_seconds,
         "pages":                   pages,
+        "edition_id":              edition_id,
     }
     log.info('  ✓ Synced "%s" at %.1f%%', title, progress * 100)
 
