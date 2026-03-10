@@ -1,0 +1,20 @@
+services:
+  storyteller-hardcover-sync:
+    build: .
+    image: storyteller-hardcover-sync:latest
+    container_name: storyteller-hardcover-sync
+    restart: unless-stopped
+
+    # Host networking gives the container access to Tailscale,
+    # so STORYTELLER_URL can use your *.ts.net domain directly.
+    network_mode: host
+
+    env_file: .env
+    environment:
+      STATE_FILE: /data/state.json
+
+    volumes:
+      - sync-data:/data
+
+volumes:
+  sync-data:
