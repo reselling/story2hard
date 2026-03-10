@@ -1,7 +1,6 @@
 services:
   storyteller-hardcover-sync:
-    build: .
-    image: storyteller-hardcover-sync:latest
+    image: resellers/story2hard:latest
     container_name: storyteller-hardcover-sync
     restart: unless-stopped
 
