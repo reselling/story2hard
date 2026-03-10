@@ -1,10 +1,12 @@
 # story2hard
 
-Automatically syncs your [Storyteller](https://github.com/smoores-dev/storyteller) reading progress to [Hardcover](https://hardcover.app) every 15 minutes. One-way sync only — Storyteller is always the source of truth.
+Automatically syncs your [Storyteller](https://github.com/smoores-dev/storyteller) reading progress to [Hardcover](https://hardcover.app) every 15 minutes. One-way sync only with Storyteller as the source.
 
 ## Why
 
-I use Storyteller as my self-hosted read-aloud server (synced epub3 + audiobook). Hardcover is where I track and display my reading activity — my personal website pulls from the Hardcover API to show a live progress bar for whatever I'm currently reading. The problem: Storyteller and Hardcover don't talk to each other, so my Hardcover progress was always stale. This container fixes that automatically.
+I use Storyteller as my self-hosted read-aloud server (synced epub3 + audiobook + ebooks). Hardcover is where I track and display my reading activity. My personal website pulls from the Hardcover API to show a live progress bar for whatever I'm currently reading. 
+
+The problem: Storyteller and Hardcover don't talk to each other, so I always had to manually update my Hardcover progress. This container fixes that automatically.
 
 ---
 
@@ -58,7 +60,7 @@ volumes:
 
 ### Option B — Terminal
 
-SSH into your server or open the CasaOS terminal, then:
+SSH into your server or open your linux client's terminal, then:
 
 ```bash
 # Clone the repo
@@ -81,18 +83,18 @@ docker logs -f storyteller-hardcover-sync
 
 ---
 
-## Get your credentials
+## Credentials needed
 
 | Variable | Where to find it |
 |---|---|
-| `STORYTELLER_URL` | The URL you use to access Storyteller (e.g. `https://your-server.ts.net` or `http://192.168.1.x:8001`) |
+| `STORYTELLER_URL` | The URL you use to access Storyteller |
 | `STORYTELLER_USERNAME` | Your Storyteller login username |
 | `STORYTELLER_PASSWORD` | Your Storyteller login password |
 | `HARDCOVER_TOKEN` | [hardcover.app/account/api](https://hardcover.app/account/api) → generate a token, paste without the `Bearer ` prefix |
 
 ---
 
-## Updating
+## Updating (if I do update)
 
 ```bash
 cd /opt/story2hard
